@@ -54,16 +54,16 @@ func makeGraphicsDevice(display: DisplayConfig) -> VZVirtioGraphicsDeviceConfigu
 
 // VMWindow: an NSWindow that hosts the VZVirtualMachineView + Metal calibration overlay
 @MainActor
-class VMWindow: NSObject {
+class VMWindow: NSObject, NSWindowDelegate {
     private var window: NSWindow?
     private var vmView: VZVirtualMachineView?
+    var cursorState: CursorState?
     private let displayConfig: DisplayConfig
 
     init(displayConfig: DisplayConfig) {
         self.displayConfig = displayConfig
     }
 
-    @MainActor
     func show(vm: VZVirtualMachine) {
         let scale = NSScreen.main?.backingScaleFactor ?? 2.0
         let logicalW = CGFloat(displayConfig.widthPx) / scale
@@ -79,23 +79,97 @@ class VMWindow: NSObject {
         win.title = "nunu"
         win.center()
         win.isReleasedWhenClosed = false
+        win.delegate = self
 
-        let view = VZVirtualMachineView()
+        let view = NunuVMView()
+        view.vmWindow = self
         view.virtualMachine = vm
         view.capturesSystemKeys = true
         view.frame = rect
         view.autoresizingMask = [.width, .height]
+
+        // Gesture recognizers for Android multi-touch equivalents
+        let pinch = NSMagnificationGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
+        let swipe = NSPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+        view.addGestureRecognizer(pinch)
+        view.addGestureRecognizer(swipe)
 
         win.contentView = view
         win.makeKeyAndOrderFront(nil)
 
         self.window = win
         self.vmView = view
+        self.cursorState = CursorState(window: win)
     }
 
-    // Called by FramePacer on each vsync tick — asks the VM view to
-    // present the latest framebuffer in sync with the display refresh
     func requestFrame() {
         vmView?.needsDisplay = true
     }
+
+    // MARK: - Gestures
+
+    // Pinch → Android pinch-to-zoom via ADB multi-touch
+    @objc private func handlePinch(_ recognizer: NSMagnificationGestureRecognizer) {
+        // magnification: 0.0 = no change, positive = zoom in, negative = zoom out
+        // Forwarded to Android via ADB input injection (see ADBInput)
+        let scale = 1.0 + recognizer.magnification
+        NotificationCenter.default.post(
+            name: .nunuVMPinch,
+            object: nil,
+            userInfo: ["scale": scale, "state": recognizer.state.rawValue]
+        )
+    }
+
+    // Two-finger pan → Android scroll
+    @objc private func handlePan(_ recognizer: NSPanGestureRecognizer) {
+        guard let view = vmView else { return }
+        let translation = recognizer.translation(in: view)
+        let location = recognizer.location(in: view)
+        NotificationCenter.default.post(
+            name: .nunuVMScroll,
+            object: nil,
+            userInfo: [
+                "dx": translation.x,
+                "dy": translation.y,
+                "x": location.x,
+                "y": location.y,
+                "state": recognizer.state.rawValue,
+            ]
+        )
+        recognizer.setTranslation(.zero, in: view)
+    }
+
+    // MARK: - Cursor capture
+
+    // Click inside the VM view captures the cursor for gaming
+    func captureCursor() {
+        cursorState?.capture()
+    }
+
+    // NSWindowDelegate: release cursor when window loses focus
+    func windowDidResignKey(_ notification: Notification) {
+        cursorState?.release()
+    }
+}
+
+// NunuVMView subclasses VZVirtualMachineView to intercept mouse clicks
+// for cursor capture and key events for the Cmd+Escape release shortcut
+class NunuVMView: VZVirtualMachineView {
+    weak var vmWindow: VMWindow?
+
+    override func mouseDown(with event: NSEvent) {
+        vmWindow?.captureCursor()
+        super.mouseDown(with: event)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if vmWindow?.cursorState?.handleKeyDown(event) == true { return }
+        super.keyDown(with: event)
+    }
+}
+
+// Notification names for gesture events
+extension Notification.Name {
+    static let nunuVMPinch  = Notification.Name("nunuVMPinch")
+    static let nunuVMScroll = Notification.Name("nunuVMScroll")
 }
