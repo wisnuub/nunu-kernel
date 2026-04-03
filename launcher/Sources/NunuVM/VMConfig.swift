@@ -7,6 +7,7 @@ struct VMConfig {
     let memoryMB: UInt64
     let cpuCount: Int
     let adbPort: Int
+    let display: DisplayConfig
 
     var memoryBytes: UInt64 { memoryMB * 1024 * 1024 }
 }

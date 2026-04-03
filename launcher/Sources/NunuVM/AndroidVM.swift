@@ -1,9 +1,11 @@
+import AppKit
 import Foundation
 import Virtualization
 
 class AndroidVM: NSObject {
     private let config: VMConfig
     private var vm: VZVirtualMachine?
+    private var vmWindow: VMWindow?
     private var stopContinuation: CheckedContinuation<Void, Never>?
 
     init(config: VMConfig) {
@@ -20,6 +22,12 @@ class AndroidVM: NSObject {
 
         try await machine.start()
         print("nunu-vm: started")
+
+        // Show window on main thread
+        let display = config.display
+        let window = VMWindow(displayConfig: display)
+        self.vmWindow = window
+        await MainActor.run { window.show(vm: machine) }
     }
 
     func waitUntilStopped() async {
@@ -39,6 +47,7 @@ class AndroidVM: NSObject {
         c.bootLoader = try makeBootLoader()
         c.storageDevices = try makeStorageDevices()
         c.networkDevices = makeNetworkDevices()
+        c.graphicsDevices = [makeGraphicsDevice(display: config.display)]
         c.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         c.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
 

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Virtualization
 
@@ -7,10 +8,14 @@ struct NunuVM {
         let args = Arguments.parse()
 
         switch args.command {
-        case .boot:
-            await boot(args: args)
         case .version:
             print("nunu-vm 0.1.0")
+        case .boot:
+            // NSApplication must be initialized for VZVirtualMachineView to work
+            let app = NSApplication.shared
+            app.setActivationPolicy(.regular)
+
+            await boot(args: args)
         }
     }
 
@@ -21,7 +26,8 @@ struct NunuVM {
             diskPaths: args.disks,
             memoryMB: args.memoryMB,
             cpuCount: args.cpuCount,
-            adbPort: args.adbPort
+            adbPort: args.adbPort,
+            display: args.display
         )
 
         let vm = AndroidVM(config: config)

@@ -13,6 +13,25 @@ struct Arguments {
     var memoryMB: UInt64 = 4096
     var cpuCount: Int = 4
     var adbPort: Int = 5555
+    var displayWidth: Int = 1080
+    var displayHeight: Int = 1920
+    var displayPPI: Int = 420
+    var colorProfile: String = "default"  // default | vivid | cinema
+
+    var display: DisplayConfig {
+        let cal: ColorCalibration
+        switch colorProfile {
+        case "vivid":  cal = .vivid
+        case "cinema": cal = .cinema
+        default:       cal = .default
+        }
+        return DisplayConfig(
+            widthPx: displayWidth,
+            heightPx: displayHeight,
+            ppi: displayPPI,
+            colorCalibration: cal
+        )
+    }
 
     static func parse() -> Arguments {
         var args = Arguments()
@@ -35,6 +54,14 @@ struct Arguments {
                 i += 1; if i < raw.count { args.cpuCount = Int(raw[i]) ?? 4 }
             case "--adb-port":
                 i += 1; if i < raw.count { args.adbPort = Int(raw[i]) ?? 5555 }
+            case "--display-width":
+                i += 1; if i < raw.count { args.displayWidth = Int(raw[i]) ?? 1080 }
+            case "--display-height":
+                i += 1; if i < raw.count { args.displayHeight = Int(raw[i]) ?? 1920 }
+            case "--display-ppi":
+                i += 1; if i < raw.count { args.displayPPI = Int(raw[i]) ?? 420 }
+            case "--color-profile":
+                i += 1; if i < raw.count { args.colorProfile = raw[i] }
             default:
                 break
             }
