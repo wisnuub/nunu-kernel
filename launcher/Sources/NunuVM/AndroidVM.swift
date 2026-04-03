@@ -12,7 +12,12 @@ class AndroidVM: NSObject {
         self.config = config
     }
 
+    private var framePacer: FramePacer?
+
     func start() async throws {
+        // Apply all host-side performance optimisations before the VM starts
+        Performance.apply()
+
         let vzConfig = try buildConfiguration()
         try vzConfig.validate()
 
@@ -23,11 +28,22 @@ class AndroidVM: NSObject {
         try await machine.start()
         print("nunu-vm: started")
 
-        // Show window on main thread
+        // Show window and start frame pacer on main thread
         let display = config.display
-        let window = VMWindow(displayConfig: display)
-        self.vmWindow = window
-        await MainActor.run { window.show(vm: machine) }
+        await MainActor.run {
+            let window = VMWindow(displayConfig: display)
+            self.vmWindow = window
+            window.show(vm: machine)
+
+            // Start CVDisplayLink-driven frame pacing once window is visible
+            let pacer = FramePacer()
+            pacer.start(screen: NSScreen.main) {
+                DispatchQueue.main.async {
+                    window.requestFrame()
+                }
+            }
+            self.framePacer = pacer
+        }
     }
 
     func waitUntilStopped() async {
@@ -105,12 +121,16 @@ class AndroidVM: NSObject {
 extension AndroidVM: VZVirtualMachineDelegate {
     func guestDidStop(_ virtualMachine: VZVirtualMachine) {
         print("nunu-vm: stopped")
+        framePacer?.stop()
+        Performance.teardown()
         stopContinuation?.resume()
         stopContinuation = nil
     }
 
     func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
         fputs("nunu-vm: stopped with error: \(error.localizedDescription)\n", stderr)
+        framePacer?.stop()
+        Performance.teardown()
         stopContinuation?.resume()
         stopContinuation = nil
     }

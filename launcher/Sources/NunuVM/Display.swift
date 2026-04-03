@@ -53,6 +53,7 @@ func makeGraphicsDevice(display: DisplayConfig) -> VZVirtioGraphicsDeviceConfigu
 }
 
 // VMWindow: an NSWindow that hosts the VZVirtualMachineView + Metal calibration overlay
+@MainActor
 class VMWindow: NSObject {
     private var window: NSWindow?
     private var vmView: VZVirtualMachineView?
@@ -90,5 +91,11 @@ class VMWindow: NSObject {
 
         self.window = win
         self.vmView = view
+    }
+
+    // Called by FramePacer on each vsync tick — asks the VM view to
+    // present the latest framebuffer in sync with the display refresh
+    func requestFrame() {
+        vmView?.needsDisplay = true
     }
 }
