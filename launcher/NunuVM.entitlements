@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Required: allows calling Virtualization.framework at all -->
+    <key>com.apple.security.virtualization</key>
+    <true/>
+
+    <!-- Required: ADB bridge listens on 127.0.0.1 -->
+    <key>com.apple.security.network.server</key>
+    <true/>
+
+    <!-- Required: ADB bridge connects out to guest IP, adb shell commands -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!-- Allows raising process priority (nice value) -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <false/>
+
+    <!-- Hardened runtime: required for notarization -->
+    <key>com.apple.security.cs.hardened-runtime</key>
+    <true/>
+</dict>
+</plist>

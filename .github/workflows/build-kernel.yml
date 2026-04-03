@@ -1,0 +1,41 @@
+name: Build Kernel
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'kernel/**'
+  workflow_dispatch:  # allow manual trigger
+
+jobs:
+  build:
+    name: Build Android kernel (ARM64)
+    runs-on: self-hosted  # Windows PC with WSL2 Ubuntu 22.04
+    # Set up self-hosted runner: github.com/wisnuub/nunu-kernel → Settings → Actions → Runners
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sync kernel source
+        run: |
+          if [ ! -d android-kernel ]; then
+            mkdir android-kernel
+            cd android-kernel
+            repo init -u https://android.googlesource.com/kernel/manifest \
+                       -b common-android14-6.1 --depth=1
+          fi
+          cd android-kernel && repo sync -j$(nproc) --no-clone-bundle --current-branch
+
+      - name: Build kernel
+        run: |
+          cd android-kernel
+          tools/bazel build //common:kernel_aarch64 \
+            --config=fast \
+            --kconfig_ext=$GITHUB_WORKSPACE/kernel/gaming_defconfig
+
+      - name: Upload kernel image
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-arm64-gaming
+          path: android-kernel/bazel-bin/common/kernel_aarch64/Image.gz
+          retention-days: 90
