@@ -13,6 +13,7 @@ class AndroidVM: NSObject {
     }
 
     private var framePacer: FramePacer?
+    private var adbBridge: ADBBridge?
 
     func start() async throws {
         // Apply all host-side performance optimisations before the VM starts
@@ -26,7 +27,12 @@ class AndroidVM: NSObject {
         self.vm = machine
 
         try await machine.start()
-        print("nunu-vm: started")
+        print(#"{"event":"started"}"#)
+
+        // Start ADB bridge in background — polls until ADB daemon is up
+        let bridge = ADBBridge(hostPort: config.adbPort, guestIP: "192.168.64.2")
+        self.adbBridge = bridge
+        Task { await bridge.start() }
 
         // Show window and start frame pacer on main thread
         let display = config.display
@@ -120,16 +126,19 @@ class AndroidVM: NSObject {
 
 extension AndroidVM: VZVirtualMachineDelegate {
     func guestDidStop(_ virtualMachine: VZVirtualMachine) {
-        print("nunu-vm: stopped")
+        print(#"{"event":"stopped"}"#)
         framePacer?.stop()
+        Task { await adbBridge?.stop() }
         Performance.teardown()
         stopContinuation?.resume()
         stopContinuation = nil
     }
 
     func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
-        fputs("nunu-vm: stopped with error: \(error.localizedDescription)\n", stderr)
+        let msg = error.localizedDescription
+        print(#"{"event":"error","message":"\#(msg)"}"#)
         framePacer?.stop()
+        Task { await adbBridge?.stop() }
         Performance.teardown()
         stopContinuation?.resume()
         stopContinuation = nil
