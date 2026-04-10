@@ -14,7 +14,6 @@ on:
 env:
   KERNEL_BRANCH: ${{ github.event.inputs.kernel_branch || 'android16-6.12' }}
   ARCH: arm64
-  CLANG_VERSION: r530567
 
 jobs:
   build:
@@ -23,11 +22,11 @@ jobs:
     timeout-minutes: 180
 
     steps:
-      # ── 1. Checkout this repo (build scripts + configs) ─────────────────────
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
       - name: Checkout nunu-kernel
         uses: actions/checkout@v4
 
-      # ── 2. Install build dependencies ───────────────────────────────────────
+      # ── 2. Install dependencies + LLVM/Clang (native x86_64) ────────────────
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
@@ -35,9 +34,27 @@ jobs:
             bc bison flex libssl-dev libelf-dev libncurses-dev \
             python3 python3-pip git curl unzip rsync \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            cpio kmod
+            cpio kmod make
 
-      # ── 3. Cache kernel source + toolchain ──────────────────────────────────
+          # Install LLVM 18 (native x86_64 — required for LLVM=1 kernel builds)
+          curl -fsSL https://apt.llvm.org/llvm.sh | sudo bash -s 18
+          sudo apt-get install -y --no-install-recommends \
+            clang-18 lld-18 llvm-18 clang-tools-18
+
+          # Symlink so the kernel Makefile finds them as 'clang', 'ld.lld', etc.
+          sudo update-alternatives --install /usr/bin/clang   clang   /usr/bin/clang-18   100
+          sudo update-alternatives --install /usr/bin/lld     lld     /usr/bin/lld-18     100
+          sudo update-alternatives --install /usr/bin/ld.lld  ld.lld  /usr/bin/ld.lld-18  100
+          sudo update-alternatives --install /usr/bin/llvm-ar llvm-ar /usr/bin/llvm-ar-18 100
+          sudo update-alternatives --install /usr/bin/llvm-nm llvm-nm /usr/bin/llvm-nm-18 100
+          sudo update-alternatives --install /usr/bin/llvm-objcopy llvm-objcopy /usr/bin/llvm-objcopy-18 100
+          sudo update-alternatives --install /usr/bin/llvm-objdump llvm-objdump /usr/bin/llvm-objdump-18 100
+          sudo update-alternatives --install /usr/bin/llvm-strip   llvm-strip   /usr/bin/llvm-strip-18   100
+
+          echo "Clang version: $(clang --version | head -1)"
+          echo "ld.lld version: $(ld.lld --version | head -1)"
+
+      # ── 3. Cache kernel source ───────────────────────────────────────────────
       - name: Cache kernel source
         uses: actions/cache@v4
         id: cache-kernel
@@ -45,13 +62,6 @@ jobs:
           path: kernel/common
           key: kernel-${{ env.KERNEL_BRANCH }}-${{ hashFiles('kernel/.kernel-rev') }}
           restore-keys: kernel-${{ env.KERNEL_BRANCH }}-
-
-      - name: Cache LLVM toolchain
-        uses: actions/cache@v4
-        id: cache-llvm
-        with:
-          path: toolchain/clang
-          key: clang-${{ env.CLANG_VERSION }}
 
       # ── 4. Clone kernel source (shallow) ────────────────────────────────────
       - name: Clone kernel/common
@@ -64,73 +74,52 @@ jobs:
             kernel/common
           git -C kernel/common rev-parse HEAD > kernel/.kernel-rev
 
-      # ── 5. Download LLVM prebuilt toolchain ─────────────────────────────────
-      - name: Download LLVM toolchain
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p toolchain
-          CLANG_URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-${{ env.CLANG_VERSION }}.tar.gz"
-          # Try AOSP mirror first, fall back to GitHub prebuilts
-          curl -L --retry 3 \
-            "https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/clang+llvm-17.0.6-aarch64-linux-gnu.tar.xz" \
-            -o toolchain/clang.tar.xz
-          mkdir -p toolchain/clang
-          tar -xf toolchain/clang.tar.xz -C toolchain/clang --strip-components=1
-          rm toolchain/clang.tar.xz
-
-      # ── 6. Apply KernelSU ────────────────────────────────────────────────────
+      # ── 5. Apply KernelSU ────────────────────────────────────────────────────
       - name: Apply KernelSU
         working-directory: kernel/common
         run: |
           echo "Applying KernelSU via official setup script…"
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
-          echo "KernelSU driver added at $(ls drivers/kernelsu/ 2>/dev/null || ls KernelSU/kernel/ 2>/dev/null)"
+          echo "KernelSU applied."
+          ls drivers/kernelsu/ 2>/dev/null || true
 
-      # ── 7. Apply SUSFS patches ───────────────────────────────────────────────
+      # ── 6. Apply SUSFS patches ───────────────────────────────────────────────
       - name: Apply SUSFS
         working-directory: kernel/common
         run: |
-          echo "Fetching SUSFS4KSU patches for ${{ env.KERNEL_BRANCH }}…"
-
-          # Clone susfs4ksu to get the patch files
           git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git /tmp/susfs4ksu
 
-          # Apply kernel patches (fs/ and include/linux/ modifications)
           PATCH_DIR="/tmp/susfs4ksu/kernel_patches"
           KERNEL_VER="6.12"
 
-          # Try exact version first, then fall back to nearest
-          if ls "$PATCH_DIR/$KERNEL_VER/"*.patch &>/dev/null; then
-            echo "Applying patches for kernel $KERNEL_VER"
+          if ls "$PATCH_DIR/$KERNEL_VER/"*.patch &>/dev/null 2>&1; then
+            echo "Applying SUSFS patches for kernel $KERNEL_VER"
             for p in "$PATCH_DIR/$KERNEL_VER/"*.patch; do
               echo "  Applying: $(basename $p)"
-              patch -p1 < "$p" || { echo "WARN: patch failed, trying with --forward"; patch -p1 --forward < "$p" || true; }
+              patch -p1 < "$p" || { echo "WARN: retrying with --forward"; patch -p1 --forward < "$p" || true; }
             done
           else
-            echo "No patches for $KERNEL_VER — checking available versions:"
-            ls "$PATCH_DIR/"
-            # Try the highest available version
+            echo "No patches for $KERNEL_VER — available:"
+            ls "$PATCH_DIR/" || true
             AVAIL=$(ls "$PATCH_DIR/" | grep -E '^[0-9]' | sort -V | tail -1)
-            echo "Using patches for $AVAIL"
-            for p in "$PATCH_DIR/$AVAIL/"*.patch; do
-              echo "  Applying: $(basename $p)"
-              patch -p1 < "$p" || true
-            done
+            if [ -n "$AVAIL" ]; then
+              echo "Falling back to patches for $AVAIL"
+              for p in "$PATCH_DIR/$AVAIL/"*.patch; do
+                patch -p1 < "$p" || true
+              done
+            fi
           fi
 
-          # Copy SUSFS source files
-          cp -r /tmp/susfs4ksu/kernel_patches/fs/* fs/ 2>/dev/null || true
+          # Copy SUSFS fs/include additions
+          cp -r /tmp/susfs4ksu/kernel_patches/fs/*      fs/      2>/dev/null || true
           cp -r /tmp/susfs4ksu/kernel_patches/include/* include/ 2>/dev/null || true
-
           echo "SUSFS patches applied."
 
-      # ── 8. Configure kernel ──────────────────────────────────────────────────
+      # ── 7. Configure kernel ──────────────────────────────────────────────────
       - name: Configure kernel
         working-directory: kernel/common
         run: |
-          export PATH="${GITHUB_WORKSPACE}/toolchain/clang/bin:$PATH"
-
-          # Use virtual device (Cuttlefish) config if available, else GKI
+          # Pick base config: prefer Cuttlefish virtual device, then GKI
           if [ -f "arch/arm64/configs/virtual_device_aarch64_defconfig" ]; then
             BASE_CONFIG="virtual_device_aarch64_defconfig"
           elif [ -f "arch/arm64/configs/gki_defconfig" ]; then
@@ -138,31 +127,31 @@ jobs:
           else
             BASE_CONFIG="defconfig"
           fi
-
           echo "Using base config: $BASE_CONFIG"
-          make ARCH=${{ env.ARCH }} LLVM=1 LLVM_IAS=1 $BASE_CONFIG
 
-          # Enable KernelSU
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld $BASE_CONFIG
+
+          # KernelSU
           scripts/config --enable CONFIG_KSU
           scripts/config --enable CONFIG_KSU_DEBUG || true
 
-          # Enable SUSFS
-          scripts/config --enable CONFIG_KSU_SUSFS || true
-          scripts/config --enable CONFIG_KSU_SUSFS_SUS_PATH || true
+          # SUSFS
+          scripts/config --enable CONFIG_KSU_SUSFS           || true
+          scripts/config --enable CONFIG_KSU_SUSFS_SUS_PATH  || true
           scripts/config --enable CONFIG_KSU_SUSFS_SUS_MOUNT || true
           scripts/config --enable CONFIG_KSU_SUSFS_SUS_KSTAT || true
           scripts/config --enable CONFIG_KSU_SUSFS_SUS_OVERLAYFS || true
-          scripts/config --enable CONFIG_KSU_SUSFS_TRY_UMOUNT || true
-          scripts/config --enable CONFIG_KSU_SUSFS_SPOOF_UNAME || true
-          scripts/config --enable CONFIG_KSU_SUSFS_ENABLE_LOG || true
-          scripts/config --enable CONFIG_KSU_SUSFS_OPEN_REDIRECT || true
+          scripts/config --enable CONFIG_KSU_SUSFS_TRY_UMOUNT     || true
+          scripts/config --enable CONFIG_KSU_SUSFS_SPOOF_UNAME    || true
+          scripts/config --enable CONFIG_KSU_SUSFS_ENABLE_LOG     || true
+          scripts/config --enable CONFIG_KSU_SUSFS_OPEN_REDIRECT  || true
 
-          # Ensure modules are enabled (needed for KernelSU LKM as fallback)
+          # Modules + probes
           scripts/config --enable CONFIG_MODULES
           scripts/config --enable CONFIG_MODULE_UNLOAD
           scripts/config --enable CONFIG_KPROBES
 
-          # Cuttlefish / virtio requirements
+          # Cuttlefish / VirtIO
           scripts/config --enable CONFIG_VIRTIO
           scripts/config --enable CONFIG_VIRTIO_NET
           scripts/config --enable CONFIG_VIRTIO_BLK
@@ -170,46 +159,37 @@ jobs:
           scripts/config --enable CONFIG_DRM_VIRTIO_GPU
           scripts/config --enable CONFIG_VIRTIO_INPUT
 
-          # Accept new configs with defaults
-          yes "" | make ARCH=${{ env.ARCH }} LLVM=1 LLVM_IAS=1 olddefconfig
+          # Accept new symbols with defaults
+          yes "" | make ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld olddefconfig
 
-      # ── 9. Build kernel ──────────────────────────────────────────────────────
+      # ── 8. Build kernel ──────────────────────────────────────────────────────
       - name: Build kernel
         working-directory: kernel/common
         run: |
-          export PATH="${GITHUB_WORKSPACE}/toolchain/clang/bin:$PATH"
-          make ARCH=${{ env.ARCH }} LLVM=1 LLVM_IAS=1 \
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld \
             -j$(nproc) \
             Image Image.gz 2>&1 | tee ../build.log
-          echo "Build finished. Kernel image:"
           ls -lh arch/arm64/boot/Image* 2>/dev/null
 
-      # ── 10. Package artifacts ────────────────────────────────────────────────
+      # ── 9. Package artifacts ─────────────────────────────────────────────────
       - name: Package artifacts
         run: |
           mkdir -p out
-
-          # Copy kernel image — nunu expects 'vmlinuz_full'
-          cp kernel/common/arch/arm64/boot/Image out/vmlinuz_full
-          cp kernel/common/arch/arm64/boot/Image out/Image
+          cp kernel/common/arch/arm64/boot/Image    out/vmlinuz_full
+          cp kernel/common/arch/arm64/boot/Image    out/Image
           cp kernel/common/arch/arm64/boot/Image.gz out/Image.gz 2>/dev/null || true
 
-          # Capture kernel version string
-          KVER=$(cat kernel/common/include/config/kernel.release 2>/dev/null || \
-                 make -s -C kernel/common ARCH=arm64 kernelversion 2>/dev/null || \
-                 echo "android16-6.12-kernelsu-susfs")
+          KVER=$(cat kernel/common/include/config/kernel.release 2>/dev/null || echo "android16-6.12-ksu-susfs")
           echo "$KVER" > out/kernel-version.txt
 
-          # Build summary
-          echo "Kernel: $KVER" > out/build-info.txt
-          echo "KernelSU: $(git -C kernel/common/KernelSU describe --tags 2>/dev/null || git -C kernel/common log --oneline -1 drivers/kernelsu/ 2>/dev/null || echo 'applied')" >> out/build-info.txt
-          echo "SUSFS: applied" >> out/build-info.txt
-          echo "Built: $(date -u)" >> out/build-info.txt
+          echo "Kernel: $KVER"                                                                    > out/build-info.txt
+          echo "KernelSU: $(git -C kernel/common log --oneline -1 drivers/kernelsu/ 2>/dev/null || echo applied)" >> out/build-info.txt
+          echo "SUSFS: applied"                                                                  >> out/build-info.txt
+          echo "Built: $(date -u)"                                                               >> out/build-info.txt
 
-          echo "--- Artifacts ---"
           ls -lh out/
 
-      # ── 11. Upload build artifacts ───────────────────────────────────────────
+      # ── 10. Upload artifacts ─────────────────────────────────────────────────
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -217,7 +197,7 @@ jobs:
           path: out/
           retention-days: 30
 
-      # ── 12. Create release (on tag push) ─────────────────────────────────────
+      # ── 11. Create GitHub Release (tag builds only) ──────────────────────────
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
@@ -235,7 +215,8 @@ jobs:
             - **SUSFS** — filesystem-level root hiding
 
             ### Usage
-            Replace `vmlinuz_full` in your `~/.nunu/cuttlefish/` directory with the one from this release.
+            In nunu Settings → Custom Kernel → Download Kernel.
+            Or manually replace `~/.nunu/cuttlefish/vmlinuz_full`.
 
             ### Kernel info
             Branch: `${{ env.KERNEL_BRANCH }}`
