@@ -1,4 +1,9 @@
-name: Build Kernel (KernelSU + SUSFS)
+name: Build Kernel (KernelSU-Next + SUSFS)
+
+# Builds the Android emulator (goldfish/ranchu) kernel for nunu's native macOS
+# app, which runs Google's Android emulator engine — NOT Cuttlefish. The stock
+# image ships 6.1.23-android14 (GKI android14-6.1), so we build that branch and
+# publish a drop-in `kernel-ranchu`.
 
 on:
   push:
@@ -7,17 +12,18 @@ on:
   workflow_dispatch:
     inputs:
       kernel_branch:
-        description: 'Android kernel branch'
+        description: 'Android kernel branch (match the emulator image)'
         required: false
-        default: 'android16-6.12'
+        default: 'android14-6.1'
 
 env:
-  KERNEL_BRANCH: ${{ github.event.inputs.kernel_branch || 'android16-6.12' }}
+  KERNEL_BRANCH: ${{ github.event.inputs.kernel_branch || 'android14-6.1' }}
+  SUSFS_VER: '6.1'
   ARCH: arm64
 
 jobs:
   build:
-    name: Build android16-6.12 + KernelSU + SUSFS
+    name: Build ${{ github.event.inputs.kernel_branch || 'android14-6.1' }} + KernelSU-Next + SUSFS
     runs-on: ubuntu-22.04
     timeout-minutes: 180
 
@@ -26,7 +32,7 @@ jobs:
       - name: Checkout nunu-kernel
         uses: actions/checkout@v4
 
-      # ── 2. Install dependencies + LLVM/Clang (native x86_64) ────────────────
+      # ── 2. Dependencies + LLVM/Clang (native x86_64) ────────────────────────
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
@@ -36,25 +42,16 @@ jobs:
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
             cpio kmod make
 
-          # Install LLVM 18 (native x86_64 — required for LLVM=1 kernel builds)
           curl -fsSL https://apt.llvm.org/llvm.sh | sudo bash -s 18
           sudo apt-get install -y --no-install-recommends \
             clang-18 lld-18 llvm-18 clang-tools-18
 
-          # Symlink so the kernel Makefile finds them as 'clang', 'ld.lld', etc.
-          sudo update-alternatives --install /usr/bin/clang   clang   /usr/bin/clang-18   100
-          sudo update-alternatives --install /usr/bin/lld     lld     /usr/bin/lld-18     100
-          sudo update-alternatives --install /usr/bin/ld.lld  ld.lld  /usr/bin/ld.lld-18  100
-          sudo update-alternatives --install /usr/bin/llvm-ar llvm-ar /usr/bin/llvm-ar-18 100
-          sudo update-alternatives --install /usr/bin/llvm-nm llvm-nm /usr/bin/llvm-nm-18 100
-          sudo update-alternatives --install /usr/bin/llvm-objcopy llvm-objcopy /usr/bin/llvm-objcopy-18 100
-          sudo update-alternatives --install /usr/bin/llvm-objdump llvm-objdump /usr/bin/llvm-objdump-18 100
-          sudo update-alternatives --install /usr/bin/llvm-strip   llvm-strip   /usr/bin/llvm-strip-18   100
+          for t in clang lld ld.lld llvm-ar llvm-nm llvm-objcopy llvm-objdump llvm-strip; do
+            sudo update-alternatives --install /usr/bin/$t $t /usr/bin/$t-18 100
+          done
+          echo "Clang: $(clang --version | head -1)"
 
-          echo "Clang version: $(clang --version | head -1)"
-          echo "ld.lld version: $(ld.lld --version | head -1)"
-
-      # ── 3. Cache kernel source ───────────────────────────────────────────────
+      # ── 3. Cache + clone kernel source ──────────────────────────────────────
       - name: Cache kernel source
         uses: actions/cache@v4
         id: cache-kernel
@@ -63,133 +60,111 @@ jobs:
           key: kernel-${{ env.KERNEL_BRANCH }}-${{ hashFiles('kernel/.kernel-rev') }}
           restore-keys: kernel-${{ env.KERNEL_BRANCH }}-
 
-      # ── 4. Clone kernel source (shallow) ────────────────────────────────────
       - name: Clone kernel/common
         if: steps.cache-kernel.outputs.cache-hit != 'true'
         run: |
-          git clone \
-            --depth=1 \
-            --branch ${{ env.KERNEL_BRANCH }} \
-            https://android.googlesource.com/kernel/common \
-            kernel/common
+          git clone --depth=1 --branch ${{ env.KERNEL_BRANCH }} \
+            https://android.googlesource.com/kernel/common kernel/common
           git -C kernel/common rev-parse HEAD > kernel/.kernel-rev
 
-      # ── 5. Apply KernelSU ────────────────────────────────────────────────────
-      - name: Apply KernelSU
+      # ── 4. Apply KernelSU-Next ──────────────────────────────────────────────
+      # KernelSU-Next (not tiann/KernelSU): it's the SUSFS-integrated fork, and it
+      # must match the KernelSU-Next manager app the nunu app installs.
+      - name: Apply KernelSU-Next
         working-directory: kernel/common
         run: |
-          echo "Applying KernelSU via official setup script…"
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
-          echo "KernelSU applied."
-          ls drivers/kernelsu/ 2>/dev/null || true
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+          echo "KernelSU-Next applied:"
+          ls drivers/kernelsu/ 2>/dev/null || ls KernelSU-Next 2>/dev/null || true
 
-      # ── 6. Apply SUSFS patches ───────────────────────────────────────────────
+      # ── 5. Apply SUSFS patches (kernel-side hiding) ─────────────────────────
       - name: Apply SUSFS
         working-directory: kernel/common
         run: |
-          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git /tmp/susfs4ksu
+          git clone --depth=1 -b "gki-${KERNEL_BRANCH}" \
+            https://gitlab.com/simonpunk/susfs4ksu.git /tmp/susfs4ksu \
+            || git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git /tmp/susfs4ksu
 
           PATCH_DIR="/tmp/susfs4ksu/kernel_patches"
-          KERNEL_VER="6.12"
-
-          if ls "$PATCH_DIR/$KERNEL_VER/"*.patch &>/dev/null 2>&1; then
-            echo "Applying SUSFS patches for kernel $KERNEL_VER"
-            for p in "$PATCH_DIR/$KERNEL_VER/"*.patch; do
-              echo "  Applying: $(basename $p)"
-              patch -p1 < "$p" || { echo "WARN: retrying with --forward"; patch -p1 --forward < "$p" || true; }
+          # Kernel-core SUSFS patch for this version
+          if [ -f "$PATCH_DIR/50_add_susfs_in_gki-${KERNEL_BRANCH}.patch" ]; then
+            patch -p1 < "$PATCH_DIR/50_add_susfs_in_gki-${KERNEL_BRANCH}.patch" || patch -p1 --forward < "$PATCH_DIR/50_add_susfs_in_gki-${KERNEL_BRANCH}.patch" || true
+          elif ls "$PATCH_DIR/${SUSFS_VER}/"*.patch >/dev/null 2>&1; then
+            for p in "$PATCH_DIR/${SUSFS_VER}/"*.patch; do
+              patch -p1 < "$p" || patch -p1 --forward < "$p" || true
             done
           else
-            echo "No patches for $KERNEL_VER — available:"
-            ls "$PATCH_DIR/" || true
-            AVAIL=$(ls "$PATCH_DIR/" | grep -E '^[0-9]' | sort -V | tail -1)
-            if [ -n "$AVAIL" ]; then
-              echo "Falling back to patches for $AVAIL"
-              for p in "$PATCH_DIR/$AVAIL/"*.patch; do
-                patch -p1 < "$p" || true
-              done
-            fi
+            echo "No matching SUSFS patch; available:"; ls "$PATCH_DIR" || true
           fi
 
-          # Copy SUSFS fs/include additions
-          cp -r /tmp/susfs4ksu/kernel_patches/fs/*      fs/      2>/dev/null || true
-          cp -r /tmp/susfs4ksu/kernel_patches/include/* include/ 2>/dev/null || true
-          echo "SUSFS patches applied."
+          cp -r "$PATCH_DIR"/fs/*      fs/      2>/dev/null || true
+          cp -r "$PATCH_DIR"/include/* include/ 2>/dev/null || true
+          echo "SUSFS applied."
 
-      # ── 7. Configure kernel ──────────────────────────────────────────────────
+      # ── 6. Configure for the emulator (goldfish/ranchu + virtio) ────────────
       - name: Configure kernel
         working-directory: kernel/common
         run: |
-          # Pick base config: prefer Cuttlefish virtual device, then GKI
-          if [ -f "arch/arm64/configs/virtual_device_aarch64_defconfig" ]; then
-            BASE_CONFIG="virtual_device_aarch64_defconfig"
-          elif [ -f "arch/arm64/configs/gki_defconfig" ]; then
-            BASE_CONFIG="gki_defconfig"
-          else
-            BASE_CONFIG="defconfig"
-          fi
-          echo "Using base config: $BASE_CONFIG"
+          # The emulator kernel is GKI + goldfish/ranchu platform devices.
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld gki_defconfig
 
-          make ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld $BASE_CONFIG
-
-          # KernelSU
+          # KernelSU-Next
           scripts/config --enable CONFIG_KSU
-          scripts/config --enable CONFIG_KSU_DEBUG || true
 
-          # SUSFS
-          scripts/config --enable CONFIG_KSU_SUSFS           || true
-          scripts/config --enable CONFIG_KSU_SUSFS_SUS_PATH  || true
-          scripts/config --enable CONFIG_KSU_SUSFS_SUS_MOUNT || true
-          scripts/config --enable CONFIG_KSU_SUSFS_SUS_KSTAT || true
-          scripts/config --enable CONFIG_KSU_SUSFS_SUS_OVERLAYFS || true
-          scripts/config --enable CONFIG_KSU_SUSFS_TRY_UMOUNT     || true
-          scripts/config --enable CONFIG_KSU_SUSFS_SPOOF_UNAME    || true
-          scripts/config --enable CONFIG_KSU_SUSFS_ENABLE_LOG     || true
-          scripts/config --enable CONFIG_KSU_SUSFS_OPEN_REDIRECT  || true
+          # SUSFS feature set (root/mount/stat hiding + uname spoof)
+          for f in CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_MOUNT \
+                   CONFIG_KSU_SUSFS_SUS_KSTAT CONFIG_KSU_SUSFS_SUS_OVERLAYFS \
+                   CONFIG_KSU_SUSFS_TRY_UMOUNT CONFIG_KSU_SUSFS_SPOOF_UNAME \
+                   CONFIG_KSU_SUSFS_ENABLE_LOG CONFIG_KSU_SUSFS_OPEN_REDIRECT \
+                   CONFIG_KSU_SUSFS_SUS_SU; do
+            scripts/config --enable $f || true
+          done
 
-          # Modules + probes
+          # Module loading + probes
           scripts/config --enable CONFIG_MODULES
           scripts/config --enable CONFIG_MODULE_UNLOAD
           scripts/config --enable CONFIG_KPROBES
 
-          # Cuttlefish / VirtIO
-          scripts/config --enable CONFIG_VIRTIO
-          scripts/config --enable CONFIG_VIRTIO_NET
-          scripts/config --enable CONFIG_VIRTIO_BLK
-          scripts/config --enable CONFIG_VIRTIO_CONSOLE
-          scripts/config --enable CONFIG_DRM_VIRTIO_GPU
-          scripts/config --enable CONFIG_VIRTIO_INPUT
+          # Goldfish / ranchu platform (emulated hardware the AVD exposes)
+          for g in CONFIG_GOLDFISH CONFIG_GOLDFISH_PIPE CONFIG_GOLDFISH_BUS \
+                   CONFIG_ANDROID_BINDER_IPC CONFIG_ANDROID_BINDERFS \
+                   CONFIG_VIRTIO CONFIG_VIRTIO_PCI CONFIG_VIRTIO_MMIO \
+                   CONFIG_VIRTIO_NET CONFIG_VIRTIO_BLK CONFIG_VIRTIO_CONSOLE \
+                   CONFIG_VIRTIO_INPUT CONFIG_DRM_VIRTIO_GPU CONFIG_VIRTIO_BALLOON; do
+            scripts/config --enable $g || true
+          done
 
-          # Accept new symbols with defaults
           yes "" | make ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld olddefconfig
 
-      # ── 8. Build kernel ──────────────────────────────────────────────────────
+      # ── 7. Build ─────────────────────────────────────────────────────────────
       - name: Build kernel
         working-directory: kernel/common
         run: |
           make ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld \
-            -j$(nproc) \
-            Image Image.gz 2>&1 | tee ../build.log
-          ls -lh arch/arm64/boot/Image* 2>/dev/null
+            -j$(nproc) Image Image.gz 2>&1 | tee ../build.log
+          ls -lh arch/arm64/boot/Image*
 
-      # ── 9. Package artifacts ─────────────────────────────────────────────────
+      # ── 8. Package (drop-in kernel-ranchu for nunu) ─────────────────────────
       - name: Package artifacts
         run: |
           mkdir -p out
-          cp kernel/common/arch/arm64/boot/Image    out/vmlinuz_full
+          # nunu's app downloads the asset named exactly `kernel-ranchu`. The stock
+          # emulator kernel is gzip'd, and `-kernel` accepts gzip, so publish Image.gz
+          # under that name.
+          cp kernel/common/arch/arm64/boot/Image.gz out/kernel-ranchu
+          cp kernel/common/arch/arm64/boot/Image.gz out/Image.gz
           cp kernel/common/arch/arm64/boot/Image    out/Image
-          cp kernel/common/arch/arm64/boot/Image.gz out/Image.gz 2>/dev/null || true
 
-          KVER=$(cat kernel/common/include/config/kernel.release 2>/dev/null || echo "android16-6.12-ksu-susfs")
-          echo "$KVER" > out/kernel-version.txt
+          KVER=$(cat kernel/common/include/config/kernel.release 2>/dev/null || echo "$KERNEL_BRANCH-ksunext-susfs")
+          {
+            echo "Kernel:       $KVER"
+            echo "Branch:       $KERNEL_BRANCH"
+            echo "KernelSU:     KernelSU-Next (next)"
+            echo "SUSFS:        $SUSFS_VER"
+            echo "Built:        $(date -u)"
+          } > out/build-info.txt
+          cat out/build-info.txt; ls -lh out/
 
-          echo "Kernel: $KVER"                                                                    > out/build-info.txt
-          echo "KernelSU: $(git -C kernel/common log --oneline -1 drivers/kernelsu/ 2>/dev/null || echo applied)" >> out/build-info.txt
-          echo "SUSFS: applied"                                                                  >> out/build-info.txt
-          echo "Built: $(date -u)"                                                               >> out/build-info.txt
-
-          ls -lh out/
-
-      # ── 10. Upload artifacts ─────────────────────────────────────────────────
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -197,28 +172,24 @@ jobs:
           path: out/
           retention-days: 30
 
-      # ── 11. Create GitHub Release (tag builds only) ──────────────────────────
+      # ── 9. Release (tag builds) ──────────────────────────────────────────────
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            out/vmlinuz_full
+            out/kernel-ranchu
             out/Image.gz
-            out/kernel-version.txt
             out/build-info.txt
           body: |
             ## nunu-kernel ${{ github.ref_name }}
 
-            Custom Android 16 kernel for Cuttlefish (nunu) with:
-            - **KernelSU** — root management
-            - **SUSFS** — filesystem-level root hiding
+            Android **emulator** (goldfish/ranchu) kernel for nunu — `${{ env.KERNEL_BRANCH }}` with:
+            - **KernelSU-Next** — root management
+            - **SUSFS** — kernel-side root hiding
 
             ### Usage
-            In nunu Settings → Custom Kernel → Download Kernel.
-            Or manually replace `~/.nunu/cuttlefish/vmlinuz_full`.
-
-            ### Kernel info
-            Branch: `${{ env.KERNEL_BRANCH }}`
+            In nunu → Settings → Root → Download kernel + manager. nunu boots this
+            kernel only when root is enabled; stock boot is untouched.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
