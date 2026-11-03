@@ -42,7 +42,7 @@ jobs:
             bc bison flex libssl-dev libelf-dev libncurses-dev \
             python3 python3-pip git curl unzip rsync \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            cpio kmod make
+            cpio kmod make dwarves
 
           # Prefer clang-15, fall back to 14, then the distro default.
           LLVM_VER=""
@@ -133,6 +133,11 @@ jobs:
           scripts/config --enable CONFIG_MODULES
           scripts/config --enable CONFIG_MODULE_UNLOAD
           scripts/config --enable CONFIG_KPROBES
+
+          # BTF generation needs a matching pahole and isn't needed to boot the
+          # emulator; disable it so the vmlinux link doesn't fail on the runner.
+          scripts/config --disable CONFIG_DEBUG_INFO_BTF
+          scripts/config --disable CONFIG_DEBUG_INFO_BTF_MODULES
 
           # Goldfish / ranchu platform (emulated hardware the AVD exposes)
           for g in CONFIG_GOLDFISH CONFIG_GOLDFISH_PIPE CONFIG_GOLDFISH_BUS \
